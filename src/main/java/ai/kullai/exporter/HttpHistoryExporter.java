@@ -21,7 +21,6 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.*;
-import java.util.Base64;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -29,8 +28,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 /**
  * Burp Suite extension (Montoya API) that exports Proxy/Logger HTTP history
  * filtered by the provided hostname, to either:
- *  - Burp XML (.xml)
- *  - HAR 1.2 (.har / .json)
+ * - Burp XML (.xml)
+ * - HAR 1.2 (.har / .json)
  *
  * Includes full raw request/response.
  */
@@ -39,11 +38,22 @@ public class HttpHistoryExporter implements BurpExtension {
     private MontoyaApi api;
 
     // UI widgets
-    private JTextField hostField;
+    // private JTextField hostField;
+    // private JComboBox<String> formatCombo;
+    // private JCheckBox includeResponses;
+    // private JButton exportButton;
+    // private JLabel statusLabel;
+
+    // Upadated UI widgets
+    private JList<String> hostList;
+    private DefaultListModel<String> hostListModel;
     private JComboBox<String> formatCombo;
     private JCheckBox includeResponses;
     private JButton exportButton;
     private JLabel statusLabel;
+    private JButton refreshHostsButton;
+    private JButton selectAllButton;
+    private JButton clearSelectionButton;
 
     // Formats
     private static final String FORMAT_BURP_XML = "Burp XML (.xml)";
@@ -59,6 +69,30 @@ public class HttpHistoryExporter implements BurpExtension {
             api.userInterface().registerSuiteTab("HTTP Exporter", panel);
         });
     }
+    
+    private Set<String> getAvailableHosts() {
+        Set<String> hosts = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+
+        for (ProxyHttpRequestResponse item : api.proxy().history()) {
+            HttpRequest req = item.finalRequest();
+            if (req == null || req.httpService() == null)
+                continue;
+
+            String host = req.httpService().host();
+            if (host != null && !host.isBlank()) {
+                hosts.add(host.trim());
+            }
+        }
+
+        return hosts;
+    }
+
+    private void loadHostsIntoList() {
+        hostListModel.clear();
+        for (String host : getAvailableHosts()) {
+            hostListModel.addElement(host);
+        }
+    }
 
     private JPanel buildPanel() {
         JPanel root = new JPanel(new BorderLayout());
@@ -70,31 +104,72 @@ public class HttpHistoryExporter implements BurpExtension {
         c.fill = GridBagConstraints.HORIZONTAL;
         c.gridy = 0;
 
-        // In-scope host
-        c.gridx = 0; form.add(new JLabel("In-scope host (exact match):"), c);
-        hostField = new JTextField();
-        hostField.setToolTipText("e.g., dev.manuf.app");
-        c.gridx = 1; c.weightx = 1.0; form.add(hostField, c);
+        c.gridx = 0;
+        c.anchor = GridBagConstraints.NORTHWEST;
+        form.add(new JLabel("In-scope hosts:"), c);
 
-        // Format
-        c.gridy++; c.gridx = 0; c.weightx = 0;
+        hostListModel = new DefaultListModel<>();
+        hostList = new JList<>(hostListModel);
+        hostList.setVisibleRowCount(8);
+        hostList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+
+        JScrollPane hostScrollPane = new JScrollPane(hostList);
+        hostScrollPane.setPreferredSize(new Dimension(320, 140));
+
+        JPanel hostPanel = new JPanel(new BorderLayout(6, 6));
+        hostPanel.add(hostScrollPane, BorderLayout.CENTER);
+
+        JPanel hostButtonsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+
+        refreshHostsButton = new JButton("Refresh hosts");
+        refreshHostsButton.addActionListener(e -> loadHostsIntoList());
+
+        selectAllButton = new JButton("Select all");
+        selectAllButton.addActionListener(e -> {
+            if (hostListModel.size() > 0) {
+                hostList.setSelectionInterval(0, hostListModel.size() - 1);
+            }
+        });
+
+        clearSelectionButton = new JButton("Clear selection");
+        clearSelectionButton.addActionListener(e -> hostList.clearSelection());
+
+        hostButtonsPanel.add(refreshHostsButton);
+        hostButtonsPanel.add(selectAllButton);
+        hostButtonsPanel.add(clearSelectionButton);
+
+        hostPanel.add(hostButtonsPanel, BorderLayout.SOUTH);
+
+        c.gridx = 1;
+        c.weightx = 1.0;
+        c.fill = GridBagConstraints.BOTH;
+        form.add(hostPanel, c);
+
+        loadHostsIntoList();
+
+        c.gridy++;
+        c.gridx = 0;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.HORIZONTAL;
         form.add(new JLabel("Export format:"), c);
-        formatCombo = new JComboBox<>(new String[]{FORMAT_BURP_XML, FORMAT_HAR});
-        c.gridx = 1; c.weightx = 1.0; form.add(formatCombo, c);
 
-        // Include responses
-        c.gridy++; c.gridx = 0; c.gridwidth = 2;
+        formatCombo = new JComboBox<>(new String[] { FORMAT_BURP_XML, FORMAT_HAR });
+        c.gridx = 1;
+        c.weightx = 1.0;
+        form.add(formatCombo, c);
+
+        c.gridy++;
+        c.gridx = 0;
+        c.gridwidth = 2;
         includeResponses = new JCheckBox("Include responses", true);
         form.add(includeResponses, c);
 
-        // Export button
-        c.gridy++; c.gridx = 0; c.gridwidth = 2;
+        c.gridy++;
         exportButton = new JButton("Export…");
         exportButton.addActionListener(this::onExport);
         form.add(exportButton, c);
 
-        // Status
-        c.gridy++; c.gridx = 0; c.gridwidth = 2;
+        c.gridy++;
         statusLabel = new JLabel("Ready.");
         form.add(statusLabel, c);
 
@@ -103,11 +178,23 @@ public class HttpHistoryExporter implements BurpExtension {
     }
 
     private void onExport(ActionEvent evt) {
-        String host = hostField.getText().trim();
-        if (host.isEmpty()) {
-            JOptionPane.showMessageDialog(null, "Please enter an in-scope host (e.g., dev.manuf.app).",
-                    "Missing host", JOptionPane.WARNING_MESSAGE);
+        // String host = hostField.getText().trim();
+        // if (host.isEmpty()) {
+        // JOptionPane.showMessageDialog(null, "Please enter an in-scope host (e.g.,
+        // dev.manuf.app).",
+        // "Missing host", JOptionPane.WARNING_MESSAGE);
+        // return;
+        // }
+        List<String> selectedHosts = hostList.getSelectedValuesList();
+        if (selectedHosts.isEmpty()) {
+            JOptionPane.showMessageDialog(null, "Please select at least one host.",
+                    "Missing host selection", JOptionPane.WARNING_MESSAGE);
             return;
+        }
+
+        Set<String> hostFilters = new HashSet<>();
+        for (String h : selectedHosts) {
+            hostFilters.add(h.toLowerCase(Locale.ROOT));
         }
 
         String fmt = Objects.toString(formatCombo.getSelectedItem(), FORMAT_BURP_XML);
@@ -136,17 +223,19 @@ public class HttpHistoryExporter implements BurpExtension {
         setBusy(true, "Exporting…");
         new Thread(() -> {
             try {
+                // int count = doXml
+                // ? exportBurpXml(finalOut, host, includeResponses.isSelected())
+                // : exportHar(finalOut, host, includeResponses.isSelected());
                 int count = doXml
-                        ? exportBurpXml(finalOut, host, includeResponses.isSelected())
-                        : exportHar(finalOut, host, includeResponses.isSelected());
+                        ? exportBurpXml(finalOut, hostFilters, includeResponses.isSelected())
+                        : exportHar(finalOut, hostFilters, includeResponses.isSelected());
 
                 setBusy(false, "Exported " + count + " item(s) → " + finalOut.getAbsolutePath());
             } catch (Exception ex) {
                 setBusy(false, "Export failed: " + ex.getMessage());
                 api.logging().logToError("Export failed: " + ex);
-                SwingUtilities.invokeLater(() ->
-                        JOptionPane.showMessageDialog(null, "Export failed:\n" + ex,
-                                "Error", JOptionPane.ERROR_MESSAGE));
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(null, "Export failed:\n" + ex,
+                        "Error", JOptionPane.ERROR_MESSAGE));
             }
         }, "export-thread").start();
     }
@@ -170,7 +259,8 @@ public class HttpHistoryExporter implements BurpExtension {
 
     private static String headerValue(List<HttpHeader> headers, String name) {
         for (HttpHeader h : headers) {
-            if (h.name().equalsIgnoreCase(name)) return h.value();
+            if (h.name().equalsIgnoreCase(name))
+                return h.value();
         }
         return null;
     }
@@ -205,38 +295,38 @@ public class HttpHistoryExporter implements BurpExtension {
 
     // ----------------------- Export: Burp XML -----------------------
 
-    private int exportBurpXml(File out, String hostFilter, boolean includeResponses) throws Exception {
+    private int exportBurpXml(File out, Set<String> hostFilters, boolean includeResponses) throws Exception {
         List<ProxyHttpRequestResponse> items = api.proxy().history();
 
         try (BufferedWriter w = new BufferedWriter(new OutputStreamWriter(
                 new FileOutputStream(out), StandardCharsets.UTF_8))) {
 
             w.write("""
-<?xml version="1.0"?>
-<!DOCTYPE items [
-<!ELEMENT items (item*)>
-<!ATTLIST items burpVersion CDATA "">
-<!ATTLIST items exportTime CDATA "">
-<!ELEMENT item (time, url, host, port, protocol, method, path, extension, request, status, responselength, mimetype, response, comment)>
-<!ELEMENT time (#PCDATA)>
-<!ELEMENT url (#PCDATA)>
-<!ELEMENT host (#PCDATA)>
-<!ATTLIST host ip CDATA "">
-<!ELEMENT port (#PCDATA)>
-<!ELEMENT protocol (#PCDATA)>
-<!ELEMENT method (#PCDATA)>
-<!ELEMENT path (#PCDATA)>
-<!ELEMENT extension (#PCDATA)>
-<!ELEMENT request (#PCDATA)>
-<!ATTLIST request base64 (true|false) "false">
-<!ELEMENT status (#PCDATA)>
-<!ELEMENT responselength (#PCDATA)>
-<!ELEMENT mimetype (#PCDATA)>
-<!ELEMENT response (#PCDATA)>
-<!ATTLIST response base64 (true|false) "false">
-<!ELEMENT comment (#PCDATA)>
-]>
-""");
+                    <?xml version="1.0"?>
+                    <!DOCTYPE items [
+                    <!ELEMENT items (item*)>
+                    <!ATTLIST items burpVersion CDATA "">
+                    <!ATTLIST items exportTime CDATA "">
+                    <!ELEMENT item (time, url, host, port, protocol, method, path, extension, request, status, responselength, mimetype, response, comment)>
+                    <!ELEMENT time (#PCDATA)>
+                    <!ELEMENT url (#PCDATA)>
+                    <!ELEMENT host (#PCDATA)>
+                    <!ATTLIST host ip CDATA "">
+                    <!ELEMENT port (#PCDATA)>
+                    <!ELEMENT protocol (#PCDATA)>
+                    <!ELEMENT method (#PCDATA)>
+                    <!ELEMENT path (#PCDATA)>
+                    <!ELEMENT extension (#PCDATA)>
+                    <!ELEMENT request (#PCDATA)>
+                    <!ATTLIST request base64 (true|false) "false">
+                    <!ELEMENT status (#PCDATA)>
+                    <!ELEMENT responselength (#PCDATA)>
+                    <!ELEMENT mimetype (#PCDATA)>
+                    <!ELEMENT response (#PCDATA)>
+                    <!ATTLIST response base64 (true|false) "false">
+                    <!ELEMENT comment (#PCDATA)>
+                    ]>
+                    """);
             String now = new SimpleDateFormat("EEE MMM dd HH:mm:ss z yyyy", Locale.ENGLISH).format(new Date());
             w.write("<items burpVersion=\"HTTP Exporter\" exportTime=\"" + xmlEscape(now) + "\">\n");
 
@@ -244,10 +334,11 @@ public class HttpHistoryExporter implements BurpExtension {
 
             for (ProxyHttpRequestResponse x : items) {
                 HttpRequest req = x.finalRequest();
-                if (req == null) continue;
+                if (req == null)
+                    continue;
 
                 String host = req.httpService().host();
-                if (host == null || !host.equalsIgnoreCase(hostFilter)) {
+                if (host == null || !hostFilters.contains(host.toLowerCase(Locale.ROOT))) {
                     continue;
                 }
 
@@ -255,7 +346,8 @@ public class HttpHistoryExporter implements BurpExtension {
                 int port = req.httpService().port();
                 String method = req.method();
                 String path = req.path();
-                if (path == null || path.isEmpty()) path = "/";
+                if (path == null || path.isEmpty())
+                    path = "/";
 
                 String url = req.url();
                 String ext = "";
@@ -285,7 +377,8 @@ public class HttpHistoryExporter implements BurpExtension {
                 w.write("    <status>" + status + "</status>\n");
                 w.write("    <responselength>" + rawRes.length + "</responselength>\n");
                 w.write("    <mimetype>" + xmlEscape(mime) + "</mimetype>\n");
-                w.write("    <response base64=\"" + (hasResp ? "true" : "false") + "\"><![CDATA[" + resB64 + "]]></response>\n");
+                w.write("    <response base64=\"" + (hasResp ? "true" : "false") + "\"><![CDATA[" + resB64
+                        + "]]></response>\n");
                 w.write("    <comment></comment>\n");
                 w.write("  </item>\n");
 
@@ -298,13 +391,14 @@ public class HttpHistoryExporter implements BurpExtension {
     }
 
     private static String xmlEscape(String s) {
-        if (s == null) return "";
+        if (s == null)
+            return "";
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     // ----------------------- Export: HAR 1.2 -----------------------
 
-    private int exportHar(File out, String hostFilter, boolean includeResponses) throws Exception {
+    private int exportHar(File out, Set<String> hostFilters, boolean includeResponses) throws Exception {
         List<ProxyHttpRequestResponse> items = api.proxy().history();
         ObjectMapper om = new ObjectMapper();
 
@@ -320,10 +414,11 @@ public class HttpHistoryExporter implements BurpExtension {
 
         for (ProxyHttpRequestResponse x : items) {
             HttpRequest req = x.finalRequest();
-            if (req == null) continue;
+            if (req == null)
+                continue;
 
             String host = req.httpService().host();
-            if (host == null || !host.equalsIgnoreCase(hostFilter)) {
+            if (host == null || !hostFilters.contains(host.toLowerCase(Locale.ROOT))) {
                 continue;
             }
 
